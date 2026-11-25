@@ -61,6 +61,19 @@ func gatewayKeyAttr(a []otelAttribute, r Record) []otelAttribute {
 	return append(a, otelString("magpie.gateway_key.name", r.CallerKeyName))
 }
 
+// gatewaySessionID returns the session ID for a gateway or ledger span when
+// conversation tracing is enabled, preferring the native client session ID
+// over a Magpie routing override.
+func gatewaySessionID(r Record, sp *OTelSpan) string {
+	if sp != nil && sp.SessionID != "" {
+		return sp.SessionID
+	}
+	if r.NativeSession != "" {
+		return r.NativeSession
+	}
+	return r.Session
+}
+
 func otelEnvelope(signal string, data any) map[string]any {
 	return map[string]any{"resource" + signal: []any{map[string]any{
 		"resource":       map[string]any{"attributes": otelResourceAttributes()},
@@ -188,6 +201,12 @@ func (e *otelExporter) traces(items []otelItem) any {
 				}
 			}
 			span["attributes"] = a
+		}
+		if (sp == nil || !sp.Session) && it.config.Sessions {
+			if sid := gatewaySessionID(r, sp); sid != "" {
+				a = append(a, otelString("langfuse.session.id", sid))
+				span["attributes"] = a
+			}
 		}
 		// Price only model calls, never their gateway/conversation parents or
 		// tools. Cache reads/writes belong to input cost; reasoning is already

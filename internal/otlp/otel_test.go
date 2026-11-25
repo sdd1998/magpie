@@ -454,3 +454,59 @@ func TestOTelLangfuseSetup(t *testing.T) {
 		t.Fatalf("collector saw %+v, want %+v", seen, want)
 	}
 }
+
+func TestOTelGatewayAndLedgerSessionID(t *testing.T) {
+	for _, sessionsOn := range []bool{false, true} {
+		t.Run("sessions="+strings.ToUpper(strings.TrimSpace(map[bool]string{false: "false", true: "true"}[sessionsOn])), func(t *testing.T) {
+			var traces, metrics []byte
+			collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				if strings.HasSuffix(r.URL.Path, "/metrics") {
+					metrics = append(metrics, b...)
+				} else {
+					traces = append(traces, b...)
+				}
+				io.WriteString(w, `{}`)
+			}))
+			defer collector.Close()
+			otelConfig(t, settings.OTel{Endpoint: collector.URL, Metrics: true})
+			if sessionsOn {
+				t.Setenv("MAGPIE_OTEL_SESSIONS", "true")
+			} else {
+				t.Setenv("MAGPIE_OTEL_SESSIONS", "false")
+			}
+			t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+			t.Setenv("PI_CODING_AGENT_SESSION_DIR", "")
+			t.Setenv("CODEX_HOME", t.TempDir())
+			t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+			stop := StartOTel()
+			t.Cleanup(stop)
+
+			w := testX.Begin(usage.Request{Header: http.Header{}, Agent: "OpenAI", Session: "PRIVATE-SESSION"})
+			if w == nil {
+				t.Fatal("Begin returned nil")
+			}
+			w.Attempt(Record{Time: time.Now(), Agent: "OpenAI", Provider: "minimax", Model: "m1", Status: 200})
+			w.End(Record{Time: time.Now(), Agent: "OpenAI", Model: "m1", Status: 200})
+
+			usage.Append(Record{Time: time.Now(), Agent: "OpenAI", Model: "m1", Session: "routing-override", NativeSession: "PRIVATE-NATIVE-SESSION", Status: 200})
+			stop()
+
+			if strings.Contains(string(metrics), "langfuse.session.id") || strings.Contains(string(metrics), "PRIVATE-") {
+				t.Fatalf("metrics leaked session id: %s", metrics)
+			}
+			if !sessionsOn {
+				if strings.Contains(string(traces), "langfuse.session.id") || strings.Contains(string(traces), "PRIVATE-") {
+					t.Fatalf("session exported with otel.sessions disabled: %s", traces)
+				}
+				return
+			}
+			if strings.Count(string(traces), `"key":"langfuse.session.id","value":{"stringValue":"PRIVATE-SESSION"}`) != 2 {
+				t.Fatalf("expected langfuse.session.id on both attempt and root spans, got: %s", traces)
+			}
+			if strings.Count(string(traces), `"key":"langfuse.session.id","value":{"stringValue":"PRIVATE-NATIVE-SESSION"}`) != 1 {
+				t.Fatalf("expected native session id on ledger span, got: %s", traces)
+			}
+		})
+	}
+}

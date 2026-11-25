@@ -1005,3 +1005,100 @@ func TestOTelClaudeMainAndChildDedupRetainsHelper(t *testing.T) {
 		})
 	}
 }
+
+func TestOTelGatewayExportsSessionIDWhenSessionsEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		sessions bool
+		header   string
+		override string
+		want     string
+	}{
+		{name: "sessions off drops session header", sessions: false, header: "product-69e6e46e", want: ""},
+		{name: "sessions on exports session-id", sessions: true, header: "product-69e6e46e", want: "product-69e6e46e"},
+		{name: "native session takes precedence over override", sessions: true, header: "product-69e6e46e", override: "routing-override", want: "product-69e6e46e"},
+		{name: "magpie session override used when no native header", sessions: true, override: "routing-override", want: "routing-override"},
+		{name: "empty session omitted", sessions: true, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fake{ctype: "application/json", reply: `{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}`}
+			setup(t, provider.Chat, f)
+			received := make(chan []byte, 8)
+			collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				received <- b
+				io.WriteString(w, `{}`)
+			}))
+			defer collector.Close()
+			t.Setenv("MAGPIE_OTEL_ENABLED", "true")
+			t.Setenv("MAGPIE_OTEL_ENDPOINT", collector.URL)
+			t.Setenv("MAGPIE_OTEL_HEADERS", "")
+			t.Setenv("MAGPIE_OTEL_METRICS", "false")
+			t.Setenv("MAGPIE_OTEL_BODIES", "false")
+			t.Setenv("MAGPIE_OTEL_SESSIONS", fmt.Sprintf("%t", tc.sessions))
+			fastOTel(t)
+			stop := startOTel()
+			t.Cleanup(stop)
+
+			req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m1","messages":[{"role":"user","content":"hello"}]}`))
+			req.RemoteAddr = "127.0.0.1:1234"
+			req.Header.Set("User-Agent", "OpenAI/Python 1.0")
+			if tc.header != "" {
+				req.Header.Set("session-id", tc.header)
+			}
+			if tc.override != "" {
+				req.Header.Set(SessionHeader, tc.override)
+			}
+			w := httptest.NewRecorder()
+			New().Handler().ServeHTTP(w, req)
+			if w.Code != 200 {
+				t.Fatalf("gateway: %d %s", w.Code, w.Body.String())
+			}
+			stop()
+
+			traces, _ := otelExports(received)
+			if len(traces) == 0 {
+				t.Fatal("expected trace export")
+			}
+			var got []string
+			for _, batch := range traces {
+				var wire struct {
+					ResourceSpans []struct {
+						ScopeSpans []struct {
+							Spans []struct {
+								Attributes []struct {
+									Key   string            `json:"key"`
+									Value map[string]string `json:"value"`
+								} `json:"attributes"`
+							} `json:"spans"`
+						} `json:"scopeSpans"`
+					} `json:"resourceSpans"`
+				}
+				if err := json.Unmarshal(batch, &wire); err != nil {
+					t.Fatal(err)
+				}
+				for _, rs := range wire.ResourceSpans {
+					for _, ss := range rs.ScopeSpans {
+						for _, span := range ss.Spans {
+							sid := ""
+							for _, attr := range span.Attributes {
+								if attr.Key == "langfuse.session.id" {
+									sid = attr.Value["stringValue"]
+								}
+							}
+							got = append(got, sid)
+						}
+					}
+				}
+			}
+			if len(got) != 2 {
+				t.Fatalf("want attempt and root spans, got %d (%v)", len(got), got)
+			}
+			for i, sid := range got {
+				if sid != tc.want {
+					t.Fatalf("span %d langfuse.session.id = %q, want %q", i, sid, tc.want)
+				}
+			}
+		})
+	}
+}

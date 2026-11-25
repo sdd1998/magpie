@@ -4475,8 +4475,11 @@ catalog prices are API-equivalent estimates, not subscription charges.
 
 Enable **Trace agent conversations** to instead export one trace per
 user interaction, grouping model calls and tool executions under an agent
-root. Conversation IDs group those traces into Langfuse sessions. Gateway traces
-remain available until a visible local store covers that exact agent/session.
+root. Conversation IDs group those traces into Langfuse sessions; gateway and
+ledger spans for requests that carry a session ID (native client header or
+`X-Magpie-Session`, with native taking precedence) also export
+`langfuse.session.id` while this setting is enabled, and omit it when disabled.
+Gateway traces remain available until a visible local store covers that exact agent/session.
 For Codex and Pi, a readable session header establishes readiness without
 waiting for a model/tool span. The first request checks a header bounded to
 256 KiB when needed (including Codex base instructions); subsequent polls keep

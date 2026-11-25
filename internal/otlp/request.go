@@ -70,7 +70,7 @@ func (x *Exporter) Begin(q usage.Request) usage.Watch {
 	if traceID == "" {
 		traceID = otelID(16)
 	}
-	return &request{x: x, root: OTelSpan{TraceID: traceID, SpanID: otelID(8), ParentID: parentID, Root: true}, agent: q.Agent, session: q.Session, sessionCandidate: candidate}
+	return &request{x: x, root: OTelSpan{TraceID: traceID, SpanID: otelID(8), ParentID: parentID, Root: true, SessionID: q.Session}, agent: q.Agent, session: q.Session, sessionCandidate: candidate}
 }
 
 // End sends the root span, timed to now.
@@ -88,5 +88,5 @@ func (t *request) Attempt(rec Record) {
 	if t.skip() {
 		return
 	}
-	t.x.offerSpan(rec, &OTelSpan{TraceID: t.root.TraceID, SpanID: otelID(8), ParentID: t.root.SpanID})
+	t.x.offerSpan(rec, &OTelSpan{TraceID: t.root.TraceID, SpanID: otelID(8), ParentID: t.root.SpanID, SessionID: t.session})
 }
